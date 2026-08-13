@@ -1,0 +1,3 @@
+id,client_id,card_brand,card_type,expires,has_chip,num_cards_issued,credit_limit,acct_open_date,year_pin_last_changed,card_on_dark_web,account_open_year,account_open_month
+1,101,Example Brand,Credit,2030-12,true,1,1000.00,2020-01-01,2024,false,2020,1
+2,102,Example Brand,Debit,2031-06,false,1,500.00,2021-06-01,2023,false,2021,6
