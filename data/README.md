@@ -1,13 +1,12 @@
 # Data directory
 
-This directory is reserved for documented local data assets used by the project.
+Only sanitized, non-sensitive examples may be committed here.
 
-The existing source file, `cards_data.csv`, currently remains at the repository
-root and is not moved or modified by this foundation iteration. It contains
-card numbers and CVV-like values, so treat it as sensitive: restrict access,
-avoid sharing raw records, and confirm that its storage and use are authorized.
+- `sample_cards.csv` illustrates the safe analytical card representation and
+  deliberately omits raw payment-card numbers and verification values.
+- `raw/`, `private/`, and `local/` are ignored locations for developer-owned
+  source data. Their contents must not be committed.
 
-Future datasets should be documented with their source, schema, license or usage
-terms, and any required handling controls. Do not commit secrets or production
-cardholder data.
-
+Keep source, license or usage terms, schema, and handling controls documented
+for every future dataset. Never commit production cardholder data, credentials,
+or derived files that still contain sensitive payment fields.

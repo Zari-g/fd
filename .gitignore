@@ -28,8 +28,13 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Sensitive or local datasets (sanitized samples under data/ remain trackable)
+/cards_data.csv
+/data/raw/
+/data/private/
+/data/local/
+
 # Local environment and secret files
 .env
 .env.*
 !.env.example
-
