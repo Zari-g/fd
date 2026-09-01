@@ -1,6 +1,7 @@
 """Generic and card-schema-specific dataset validation utilities."""
 
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import re
 from typing import Any, Literal, TypedDict
 
@@ -11,6 +12,8 @@ from fraud_detection.data.schema import (
     CARD_DATA_SCHEMA,
     DATE_LIKE_FIELDS,
     REQUIRED_COLUMNS,
+    TRANSACTION_DATA_SCHEMA,
+    TRANSACTION_REQUIRED_FIELDS,
 )
 
 
@@ -34,11 +37,37 @@ class CardSchemaValidationResult(TypedDict):
     issues: list[SchemaIssue]
 
 
+class TransactionSchemaValidationResult(TypedDict):
+    """Structured result returned by :func:`validate_transaction_schema`."""
+
+    is_valid: bool
+    row_count: int
+    missing_columns: list[str]
+    unexpected_columns: list[str]
+    issues: list[SchemaIssue]
+
+
 _BOOLEAN_VALUES = frozenset({"yes", "no", "true", "false", "1", "0"})
 _MONTH_YEAR_PATTERN = re.compile(r"^(0[1-9]|1[0-2])/\d{4}$")
 _CURRENCY_PATTERN = re.compile(
     r"^\s*\$?\s*[+-]?(?:\d+(?:,\d{3})*|\d+)(?:\.\d+)?\s*$"
 )
+_AMOUNT_PATTERN = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$")
+_CURRENCY_CODE_PATTERN = re.compile(r"^[A-Za-z]{3}$")
+_TRANSACTION_BOOLEAN_VALUES = frozenset(
+    {"yes", "no", "true", "false", "1", "0", "1.0", "0.0"}
+)
+CHANNEL_ALIASES: dict[str, str] = {
+    "in_store": "in_store",
+    "instore": "in_store",
+    "pos": "in_store",
+    "point_of_sale": "in_store",
+    "online": "online",
+    "ecommerce": "online",
+    "mobile": "mobile",
+    "atm": "atm",
+    "other": "other",
+}
 
 
 def _empty_mask(series: pd.Series) -> pd.Series:
@@ -54,6 +83,16 @@ def _empty_mask(series: pd.Series) -> pd.Series:
 def _issue(code: str, column: str | None, count: int, message: str) -> SchemaIssue:
     return {
         "severity": "error",
+        "code": code,
+        "column": column,
+        "count": count,
+        "message": message,
+    }
+
+
+def _warning(code: str, column: str | None, count: int, message: str) -> SchemaIssue:
+    return {
+        "severity": "warning",
         "code": code,
         "column": column,
         "count": count,
@@ -92,6 +131,48 @@ def _invalid_currency_mask(series: pd.Series) -> tuple[pd.Series, pd.Series]:
     malformed = nonempty & (~has_expected_shape | numeric.isna())
     negative = nonempty & numeric.lt(0).fillna(False)
     return malformed, negative
+
+
+def _normalized_channel(series: pd.Series) -> pd.Series:
+    return (
+        series.astype("string")
+        .str.strip()
+        .str.casefold()
+        .str.replace(r"[\s-]+", "_", regex=True)
+    )
+
+
+def _invalid_amount_mask(series: pd.Series) -> pd.Series:
+    """Return rows that cannot be represented as finite Decimal values."""
+    nonempty = ~_empty_mask(series)
+
+    def is_invalid(value: object) -> bool:
+        if pd.isna(value):
+            return False
+        text = str(value).strip()
+        if not _AMOUNT_PATTERN.fullmatch(text):
+            return True
+        try:
+            return not Decimal(text).is_finite()
+        except InvalidOperation:
+            return True
+
+    return nonempty & series.map(is_invalid)
+
+
+def _invalid_datetime_mask(series: pd.Series) -> pd.Series:
+    nonempty = ~_empty_mask(series)
+
+    def is_invalid(value: object) -> bool:
+        if pd.isna(value):
+            return False
+        try:
+            pd.Timestamp(value)
+        except (TypeError, ValueError, OverflowError):
+            return True
+        return False
+
+    return nonempty & series.map(is_invalid)
 
 
 def validate_dataset(df: pd.DataFrame) -> dict[str, Any]:
@@ -313,6 +394,224 @@ def validate_card_schema(df: pd.DataFrame) -> CardSchemaValidationResult:
 
     return {
         "is_valid": not issues,
+        "row_count": len(df),
+        "missing_columns": missing_columns,
+        "unexpected_columns": unexpected_columns,
+        "issues": issues,
+    }
+
+
+def validate_transaction_schema(
+    df: pd.DataFrame,
+) -> TransactionSchemaValidationResult:
+    """Validate transaction structure and domains without exposing row values.
+
+    Naive timestamps are structurally valid here because timezone localization
+    is an explicit preprocessing choice. Unexpected columns and unsafe domain
+    values are errors. Fraud outcome provenance gaps are warnings so labeled
+    legacy data remains ingestible while the leakage risk stays visible.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+
+    expected = set(TRANSACTION_DATA_SCHEMA)
+    actual = set(df.columns)
+    missing_columns = sorted(set(TRANSACTION_REQUIRED_FIELDS) - actual)
+    unexpected_columns = sorted(actual - expected)
+    issues: list[SchemaIssue] = []
+
+    if df.empty:
+        issues.append(_issue("empty_dataset", None, 0, "The transaction dataset contains no rows."))
+    if missing_columns:
+        issues.append(
+            _issue(
+                "missing_required_columns",
+                None,
+                len(missing_columns),
+                f"{len(missing_columns)} required transaction column(s) are missing.",
+            )
+        )
+    if unexpected_columns:
+        issues.append(
+            _issue(
+                "unexpected_columns",
+                None,
+                len(unexpected_columns),
+                f"{len(unexpected_columns)} unexpected transaction column(s) were found.",
+            )
+        )
+
+    for column in TRANSACTION_REQUIRED_FIELDS:
+        if column not in df.columns:
+            continue
+        count = int(_empty_mask(df[column]).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "empty_required_values",
+                    column,
+                    count,
+                    f"{count} rows contain empty values in required column '{column}'.",
+                )
+            )
+
+    if "transaction_id" in df.columns:
+        populated = df.loc[~_empty_mask(df["transaction_id"]), "transaction_id"]
+        count = int(populated.astype("string").str.strip().duplicated(keep=False).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "duplicate_transaction_id",
+                    "transaction_id",
+                    count,
+                    f"{count} rows have duplicated transaction IDs.",
+                )
+            )
+
+    for column in ("card_id", "client_id"):
+        if column not in df.columns:
+            continue
+        invalid = _invalid_integer_mask(df[column])
+        numeric = pd.to_numeric(df[column], errors="coerce")
+        invalid = invalid | ((~_empty_mask(df[column])) & numeric.lt(0).fillna(False))
+        count = int(invalid.sum())
+        if count:
+            issues.append(
+                _issue(
+                    "invalid_card_id" if column == "card_id" else "invalid_client_id",
+                    column,
+                    count,
+                    f"{count} rows contain invalid identifiers in column '{column}'.",
+                )
+            )
+
+    for column in ("transaction_timestamp", "fraud_confirmed_at"):
+        if column not in df.columns:
+            continue
+        count = int(_invalid_datetime_mask(df[column]).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "invalid_timestamp",
+                    column,
+                    count,
+                    f"{count} rows contain malformed timestamps in column '{column}'.",
+                )
+            )
+
+    if "amount" in df.columns:
+        count = int(_invalid_amount_mask(df["amount"]).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "invalid_amount",
+                    "amount",
+                    count,
+                    f"{count} rows contain malformed transaction amounts.",
+                )
+            )
+
+    if "currency" in df.columns:
+        populated = ~_empty_mask(df["currency"])
+        valid = df["currency"].astype("string").str.strip().str.fullmatch(
+            _CURRENCY_CODE_PATTERN
+        ).fillna(False)
+        count = int((populated & ~valid).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "invalid_currency_code",
+                    "currency",
+                    count,
+                    f"{count} rows contain invalid three-letter currency codes.",
+                )
+            )
+
+    if "channel" in df.columns:
+        populated = ~_empty_mask(df["channel"])
+        count = int((populated & ~_normalized_channel(df["channel"]).isin(CHANNEL_ALIASES)).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "invalid_channel",
+                    "channel",
+                    count,
+                    f"{count} rows contain unsupported transaction channels.",
+                )
+            )
+
+    if "fraud_label" in df.columns:
+        populated = ~_empty_mask(df["fraud_label"])
+        normalized = df["fraud_label"].astype("string").str.strip().str.casefold()
+        count = int((populated & ~normalized.isin(_TRANSACTION_BOOLEAN_VALUES)).sum())
+        if count:
+            issues.append(
+                _issue(
+                    "invalid_fraud_label",
+                    "fraud_label",
+                    count,
+                    f"{count} rows contain ambiguous fraud labels.",
+                )
+            )
+        source_missing = (
+            populated
+            if "fraud_label_source" not in df.columns
+            else populated & _empty_mask(df["fraud_label_source"])
+        )
+        source_missing_count = int(source_missing.sum())
+        if source_missing_count:
+            issues.append(
+                _warning(
+                    "missing_fraud_label_source",
+                    "fraud_label_source",
+                    source_missing_count,
+                    f"{source_missing_count} labeled rows have no fraud-label provenance.",
+                )
+            )
+        confirmation_missing = (
+            populated
+            if "fraud_confirmed_at" not in df.columns
+            else populated & _empty_mask(df["fraud_confirmed_at"])
+        )
+        confirmation_missing_count = int(confirmation_missing.sum())
+        if confirmation_missing_count:
+            issues.append(
+                _warning(
+                    "missing_fraud_confirmation_time",
+                    "fraud_confirmed_at",
+                    confirmation_missing_count,
+                    f"{confirmation_missing_count} labeled rows have no confirmation time.",
+                )
+            )
+
+    if {"transaction_timestamp", "fraud_confirmed_at"}.issubset(df.columns):
+        impossible_count = 0
+        for transaction_value, confirmed_value in zip(
+            df["transaction_timestamp"], df["fraud_confirmed_at"]
+        ):
+            if pd.isna(transaction_value) or pd.isna(confirmed_value):
+                continue
+            try:
+                transaction_time = pd.Timestamp(transaction_value)
+                confirmed_time = pd.Timestamp(confirmed_value)
+                both_aware = transaction_time.tzinfo is not None and confirmed_time.tzinfo is not None
+                both_naive = transaction_time.tzinfo is None and confirmed_time.tzinfo is None
+                if (both_aware or both_naive) and confirmed_time < transaction_time:
+                    impossible_count += 1
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if impossible_count:
+            issues.append(
+                _issue(
+                    "fraud_confirmation_before_transaction",
+                    "fraud_confirmed_at",
+                    impossible_count,
+                    f"{impossible_count} rows confirm fraud before the transaction occurred.",
+                )
+            )
+
+    return {
+        "is_valid": not any(issue["severity"] == "error" for issue in issues),
         "row_count": len(df),
         "missing_columns": missing_columns,
         "unexpected_columns": unexpected_columns,

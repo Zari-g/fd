@@ -104,6 +104,16 @@ TRANSACTION_DATA_SCHEMA: Final[dict[str, FieldSchema]] = {
         required=False,
         description="Confirmed fraud outcome and eventual supervised target.",
     ),
+    "fraud_label_source": FieldSchema(
+        "string",
+        required=False,
+        description="Provenance for a supplied fraud outcome.",
+    ),
+    "fraud_confirmed_at": FieldSchema(
+        "datetime",
+        required=False,
+        description="Time at which the fraud outcome became known.",
+    ),
 }
 
 TRANSACTION_REQUIRED_FIELDS: Final[tuple[str, ...]] = tuple(

@@ -6,6 +6,25 @@ from pathlib import Path
 import pandas as pd
 
 
+def _load_csv(
+    path: str | PathLike[str], *, dtype: str | None = None
+) -> pd.DataFrame:
+    """Load a CSV while returning value-safe read errors."""
+    csv_path = Path(path)
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file does not exist: {csv_path}")
+    if not csv_path.is_file():
+        raise IsADirectoryError(f"Expected a CSV file, received a directory: {csv_path}")
+
+    try:
+        return pd.read_csv(csv_path, dtype=dtype)
+    except pd.errors.EmptyDataError as exc:
+        raise ValueError(f"CSV file is empty: {csv_path}") from exc
+    except (pd.errors.ParserError, UnicodeDecodeError, OSError) as exc:
+        raise ValueError(f"Could not read CSV file: {csv_path}") from exc
+
+
 def load_card_data(path: str | PathLike[str]) -> pd.DataFrame:
     """Load card data from a CSV file.
 
@@ -29,16 +48,14 @@ def load_card_data(path: str | PathLike[str]) -> pd.DataFrame:
     ValueError
         If the file is empty, malformed, unreadable, or not valid UTF-8.
     """
-    csv_path = Path(path)
+    return _load_csv(path)
 
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file does not exist: {csv_path}")
-    if not csv_path.is_file():
-        raise IsADirectoryError(f"Expected a CSV file, received a directory: {csv_path}")
 
-    try:
-        return pd.read_csv(csv_path)
-    except pd.errors.EmptyDataError as exc:
-        raise ValueError(f"CSV file is empty: {csv_path}") from exc
-    except (pd.errors.ParserError, UnicodeDecodeError, OSError) as exc:
-        raise ValueError(f"Could not read CSV file {csv_path}: {exc}") from exc
+def load_transaction_data(path: str | PathLike[str]) -> pd.DataFrame:
+    """Load transaction CSV data without printing or modifying its source.
+
+    Read failures identify the file but never include row contents.
+    """
+    # Preserve exact source text so pandas inference cannot round monetary
+    # values or alter identifier formatting before explicit preprocessing.
+    return _load_csv(path, dtype="string")
