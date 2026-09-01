@@ -24,3 +24,23 @@ def valid_card_data() -> pd.DataFrame:
             "card_on_dark_web": ["No", "NO"],
         }
     )
+
+
+@pytest.fixture
+def valid_transaction_data() -> pd.DataFrame:
+    """Return a raw-shaped, fully synthetic transaction dataset."""
+    return pd.DataFrame(
+        {
+            "transaction_id": [" txn_001 ", "txn_002", "txn_003"],
+            "card_id": [1, 2, 1],
+            "transaction_timestamp": [
+                "2026-08-01T14:21:13-04:00",
+                "2026-08-02T10:00:00-04:00",
+                "2026-08-03T18:30:00-04:00",
+            ],
+            "amount": ["10.25", "-2.50", "100"],
+            "merchant_id": [" merchant_001 ", "merchant_002", "merchant_001"],
+            "channel": ["POS", "online", "in-store"],
+            "currency": ["cad", "USD", "cad"],
+        }
+    )
